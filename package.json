@@ -1,0 +1,28 @@
+{
+  "name": "ollama_monitor",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "autoprefixer": "^10.4.20",
+    "flowbite": "^2.5.2",
+    "flowbite-svelte": "^0.47.4",
+    "svelte": "^5.2.7",
+    "tailwindcss": "^3.4.9",
+    "vite": "^6.0.1"
+  },
+  "dependencies": {
+    "dayjs": "^1.11.13",
+    "flowbite-svelte-icons": "^2.0.2",
+    "github-markdown-css": "^5.8.1",
+    "socket.io-client": "^4.8.1",
+    "svelte-json-tree": "^2.2.0",
+    "svelte-markdown": "^0.4.1"
+  }
+}
