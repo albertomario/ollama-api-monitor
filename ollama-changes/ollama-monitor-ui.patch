@@ -1,0 +1,213 @@
+From c95bc17729f283c07958e0b0a70b409da29a986a Mon Sep 17 00:00:00 2001
+From: Alberto Burlacu <contact@alberto.ro>
+Date: Wed, 11 Dec 2024 01:51:09 +0200
+Subject: [PATCH 1/2] monitor  changes
+
+---
+ api/types.go     |  3 ++
+ server/routes.go | 92 ++++++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 93 insertions(+), 2 deletions(-)
+
+diff --git a/api/types.go b/api/types.go
+index 249bc990..f289cb13 100644
+--- a/api/types.go
++++ b/api/types.go
+@@ -84,6 +84,9 @@ type GenerateRequest struct {
+ 
+ // ChatRequest describes a request sent by [Client.Chat].
+ type ChatRequest struct {
++
++	RequestID string `json:"request_id"`
++
+ 	// Model is the model name, as in [GenerateRequest].
+ 	Model string `json:"model"`
+ 
+diff --git a/server/routes.go b/server/routes.go
+index 9e97565c..d4b4047c 100644
+--- a/server/routes.go
++++ b/server/routes.go
+@@ -21,6 +21,7 @@ import (
+ 	"strings"
+ 	"syscall"
+ 	"time"
++	"sync"
+ 
+ 	"github.com/gin-contrib/cors"
+ 	"github.com/gin-gonic/gin"
+@@ -39,6 +40,8 @@ import (
+ 	"github.com/ollama/ollama/types/errtypes"
+ 	"github.com/ollama/ollama/types/model"
+ 	"github.com/ollama/ollama/version"
++	"github.com/gorilla/websocket"
++	requestid "github.com/sumit-tembe/gin-requestid"
+ )
+ 
+ var mode string = gin.DebugMode
+@@ -58,8 +61,17 @@ func init() {
+ 	}
+ 
+ 	gin.SetMode(mode)
++	go handleBroadcast()
+ }
+ 
++var upgrader = websocket.Upgrader{
++	CheckOrigin: func(r *http.Request) bool { return true }, // Allow all origins
++}
++
++var clients = make(map[*websocket.Conn]bool)
++var clientsMutex = sync.Mutex{}
++var broadcastChannel = make(chan string)
++
+ var (
+ 	errRequired    = errors.New("is required")
+ 	errBadTemplate = errors.New("template error")
+@@ -1138,7 +1150,7 @@ func (s *Server) GenerateRoutes() http.Handler {
+ 	config := cors.DefaultConfig()
+ 	config.AllowWildcard = true
+ 	config.AllowBrowserExtensions = true
+-	config.AllowHeaders = []string{"Authorization", "Content-Type", "User-Agent", "Accept", "X-Requested-With"}
++	config.AllowHeaders = []string{"Authorization", "Content-Type", "User-Agent", "Accept", "X-Requested-With", "Sec-WebSocket-Protocol", "Upgrade", "Sec-Websocket-Extensions", "Sec-Websocket-Key", "Sec-Websocket-Version"}
+ 	openAIProperties := []string{"lang", "package-version", "os", "arch", "retry-count", "runtime", "runtime-version", "async"}
+ 	for _, prop := range openAIProperties {
+ 		config.AllowHeaders = append(config.AllowHeaders, "x-stainless-"+prop)
+@@ -1147,10 +1159,21 @@ func (s *Server) GenerateRoutes() http.Handler {
+ 
+ 	r := gin.Default()
+ 	r.Use(
+-		cors.New(config),
++		// cors.New(config),
++		requestid.RequestID(nil),
+ 		allowedHostsMiddleware(s.addr),
+ 	)
+ 
++	r.LoadHTMLGlob("monitor/templates/*")
++	r.StaticFile("/assets/script.js", "./monitor/assets/script.js")
++	r.StaticFile("/assets/style.css", "./monitor/assets/style.css")
++	r.GET("/api/ws", handleWebSocket)
++	r.GET("/monitor", func(c *gin.Context) {
++		c.HTML(200, "index.html", gin.H{
++			"message": "Hello, World!",
++		})
++	})
++
+ 	r.POST("/api/pull", s.PullHandler)
+ 	r.POST("/api/generate", s.GenerateHandler)
+ 	r.POST("/api/chat", s.ChatHandler)
+@@ -1186,6 +1209,55 @@ func (s *Server) GenerateRoutes() http.Handler {
+ 	return r
+ }
+ 
++
++func handleWebSocket(c *gin.Context) {
++	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
++	if err != nil {
++		slog.Debug("Error upgrading to WebSocket:", err)
++		return
++	}
++	defer conn.Close()
++
++	clientsMutex.Lock()
++	clients[conn] = true
++	clientsMutex.Unlock()
++
++	for {
++		_, message, err := conn.ReadMessage()
++		if err != nil {
++			slog.Debug("Error reading message:", err)
++			break
++		}
++		slog.Debug("Received message: %s", message)
++	}
++
++	clientsMutex.Lock()
++	delete(clients, conn)
++	clientsMutex.Unlock()
++}
++
++func handleBroadcast() {
++	for {
++		select {
++		case message := <-broadcastChannel:
++			clientsMutex.Lock()
++			for client := range clients {
++				err := client.WriteMessage(websocket.TextMessage, []byte(message))
++				if err != nil {
++					slog.Debug("Error sending message:", err)
++					client.Close()
++					delete(clients, client)
++				}
++			}
++			clientsMutex.Unlock()
++		}
++	}
++}
++
++func broadcastMessage(message string) {
++	broadcastChannel <- message
++}
++
+ func Serve(ln net.Listener) error {
+ 	level := slog.LevelInfo
+ 	if envconfig.Debug() {
+@@ -1326,6 +1398,11 @@ func streamResponse(c *gin.Context, ch chan any) {
+ 			return false
+ 		}
+ 
++		reqID := c.Request.Header.Get("X-Request-Id")
++		mergedReq := map[string]any{"request_id": reqID, "response": val}
++		merged_bts, err := json.Marshal(mergedReq)
++		broadcastMessage(string(merged_bts))
++
+ 		bts, err := json.Marshal(val)
+ 		if err != nil {
+ 			slog.Info(fmt.Sprintf("streamResponse: json.Marshal failed with %s", err))
+@@ -1461,6 +1538,17 @@ func (s *Server) ChatHandler(c *gin.Context) {
+ 		return
+ 	}
+ 
++	reqID := c.Request.Header.Get("X-Request-Id")
++	req.RequestID = reqID
++
++	reqJSON, err := json.Marshal(req)
++	if err != nil {
++		slog.Error("chat prompt error", "error", err)
++		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
++		return
++	}
++	broadcastMessage(string(reqJSON))
++
+ 	slog.Debug("chat request", "images", len(images), "prompt", prompt)
+ 
+ 	ch := make(chan any)
+-- 
+2.43.0
+
+
+From 925e739b307415cce2131e1cbbef06b61f993c7e Mon Sep 17 00:00:00 2001
+From: Alberto Burlacu <contact@alberto.ro>
+Date: Wed, 11 Dec 2024 02:12:03 +0200
+Subject: [PATCH 2/2] added favicon
+
+---
+ server/routes.go | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/server/routes.go b/server/routes.go
+index d4b4047c..07b92c0d 100644
+--- a/server/routes.go
++++ b/server/routes.go
+@@ -1165,8 +1165,9 @@ func (s *Server) GenerateRoutes() http.Handler {
+ 	)
+ 
+ 	r.LoadHTMLGlob("monitor/templates/*")
+-	r.StaticFile("/assets/script.js", "./monitor/assets/script.js")
+-	r.StaticFile("/assets/style.css", "./monitor/assets/style.css")
++	r.StaticFile("/monitor/assets/script.js", "./monitor/assets/script.js")
++	r.StaticFile("/monitor/assets/style.css", "./monitor/assets/style.css")
++	r.StaticFile("/monitor/assets/favicon.png", "./monitor/assets/favicon.png")
+ 	r.GET("/api/ws", handleWebSocket)
+ 	r.GET("/monitor", func(c *gin.Context) {
+ 		c.HTML(200, "index.html", gin.H{
+-- 
+2.43.0
+
