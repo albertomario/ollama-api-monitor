@@ -1,3 +1,8 @@
+> [!IMPORTANT]  
+> This repo contain core changes to the original Ollama repository.
+> Is adviced to not use this feature in production environment.
+> I'm not responsible for any damage caused by this feature.
+
 ### Ollama API Monitor
 
 #### Features
